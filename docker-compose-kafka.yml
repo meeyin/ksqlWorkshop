@@ -1,0 +1,296 @@
+version: '3.4'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:6.2.1
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - 2181:2181
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka
+
+  broker:
+    image: confluentinc/cp-kafka:6.2.1
+    hostname: broker
+    container_name: broker
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 100
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_CLEANER_DELETE_RETENTION_MS: 100
+      KAFKA_LOG_RETENTION_HOURS: 336
+
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+         
+      # Schema Validation
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KAFKA_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
+      # JVM heap size
+      KAFKA_HEAP_OPTS: "-Xms256M -Xmx2G"
+
+      # Reduce Kafka memory utilization
+      KAFKA_JVM_PERFORMANCE_OPTS: "-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -Djava.awt.headless=true"
+    networks:
+      - kafka
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:6.2.1
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      - broker
+    ports:
+      - 8081:8081
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'broker:29092'        
+      SCHEMA_REGISTRY_DEBUG: "true"
+    networks:
+      - kafka       
+
+  connect:
+    image: docker.io/library/kafka-connect:latest
+    build:
+      context: ./kafka-connect
+      dockerfile: Dockerfile
+    hostname: connect
+    container_name: connect
+    depends_on:
+      - broker
+      - schema-registry
+      - mssql
+      # - mssql-sink
+    ports:
+      - 8083:8083
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'broker:29092'
+      CONNECT_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_PRODUCER_CLIENT_ID: "compose-connect-producer"
+
+      CONNECT_CONFIG_STORAGE_TOPIC: docker-connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: docker-connect-status
+        
+      CONNECT_REPLICATION_FACTOR: 1
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 50000
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: "All" 
+
+      CONNECT_LOG4J_ROOT_LOGLEVEL: "ERROR"
+      CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR"
+      # CONNECT_LOG4J_LOGGERS: org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR,org.reflections=ERROR
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/local-connect-jars"
+
+      # Reduce Connect memory utilization
+      KAFKA_JVM_PERFORMANCE_OPTS: -server -XX:+UseG1GC -XX:GCTimeRatio=1
+        -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=20
+        -XX:MaxGCPauseMillis=10000 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent
+        -XX:MaxInlineLevel=15 -Djava.awt.headless=true
+    volumes:
+      - ./assets/kafka-connect-jars:/local-connect-jars
+      - ./logs/kafka-connect:/tmp
+    networks:
+      - kafka
+
+  # rest-proxy:
+  #   image: confluentinc/cp-kafka-rest:6.2.0
+  #   hostname: rest-proxy
+  #   container_name: rest-proxy
+  #   depends_on:
+  #     - broker
+  #     - schema-registry
+  #   ports:
+  #     - 8082:8082
+  #   environment:
+  #     KAFKA_REST_HOST_NAME: rest-proxy
+  #     KAFKA_REST_BOOTSTRAP_SERVERS: 'broker:29092'
+  #     KAFKA_REST_LISTENERS: "http://0.0.0.0:8082"
+  #     KAFKA_REST_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+  
+  ksqldb-server:
+    image: confluentinc/cp-ksqldb-server:6.2.1
+    hostname: ksqldb-server
+    container_name: ksqldb-server
+    depends_on:
+      - broker
+      - connect
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_CONFIG_DIR: "/etc/ksql"
+      KSQL_BOOTSTRAP_SERVERS: "broker:29092"
+      KSQL_HOST_NAME: ksqldb-server
+      KSQL_LISTENERS: "http://0.0.0.0:8088"
+      KSQL_CACHE_MAX_BYTES_BUFFERING: 0
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      KSQL_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
+      KSQL_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
+      KSQL_KSQL_CONNECT_URL: "http://connect:8083"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: 'true'
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: 'true'
+     
+    networks:
+      - kafka  
+
+  ksqldb-cli:
+  #   # *-----------------------------*
+  #   # To connect to the KSQLDB: 
+  #   #   docker exec -it ksqldb-cli ksql http://ksqldb-server:8088
+  #   # *-----------------------------*
+    image: confluentinc/cp-ksqldb-cli:6.2.1
+    container_name: ksqldb-cli
+    depends_on:
+      - broker
+      - connect
+      - ksqldb-server
+    entrypoint: /bin/sh
+    tty: true
+    networks:
+      - kafka 
+
+  mssql:
+    # *-----------------------------*
+    # To connect to the DB: 
+    #   docker exec -it mssql bash -c '/opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -U sa -P $SA_PASSWORD'
+    # *-----------------------------*
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    hostname: dbserver
+    container_name: dbserver
+    ports: 
+      - 1443:1433
+    environment: 
+      - SA_PASSWORD=H@llow0rld
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Standard
+      - MSSQL_AGENT_ENABLED=true
+      - MSSQL_TCP_PORT=1433
+    volumes:
+      - ./data/mssql:/scripts
+    command:
+      - /bin/bash
+      - -c
+      - |
+        # Launch MSSQL and send to background
+        /opt/mssql/bin/sqlservr &
+        pid=$$!
+        # Wait for it to be available
+        echo "Waiting for MS SQL to be available"
+        /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "SET NOCOUNT ON SELECT \"YAY WE ARE UP\" , @@servername"
+        is_up=$$?
+        while [ $$is_up -ne 0 ] ; do
+          echo -e $$(date)
+          /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "SET NOCOUNT ON SELECT \"YAY WE ARE UP\" , @@servername"
+          is_up=$$?
+          sleep 5
+        done
+
+        # echo "Create Developer demo"
+        # /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "CREATE DATABASE demo"
+
+        # Run every sql script in /scripts
+        for sqlscript in /scripts/*.sql
+          do /opt/mssql-tools/bin/sqlcmd -U sa -P $$SA_PASSWORD -l 30 -e -i $$sqlscript
+        done
+
+        echo "All scripts have been executed. Waiting for MS SQL(pid $$pid) to terminate."
+        # Wait on the sqlserver process
+        wait $$pid
+    networks:
+      - kafka 
+
+  # mssql-sink:
+  #   # *-----------------------------*
+  #   # To connect to the DB: 
+  #   #   docker exec -it mssql bash -c '/opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -U sa -P $SA_PASSWORD'
+  #   # *-----------------------------*
+  #   image: microsoft/mssql-server-linux:2017-CU9-GDR2
+  #   hostname: mssql-sink
+  #   container_name: mssql-sink
+  #   ports: 
+  #     - 5019:1433
+  #   environment: 
+  #     - SA_PASSWORD=H@llow0rld
+  #     - ACCEPT_EULA=Y
+  #     - MSSQL_PID=Standard
+  #     - MSSQL_AGENT_ENABLED=true
+  #     - MSSQL_TCP_PORT=1433
+  #   command:
+  #     - /bin/bash
+  #     - -c
+  #     - |
+  #       # Launch MSSQL and send to background
+  #       /opt/mssql/bin/sqlservr &
+  #       pid=$$!
+  #       # Wait for it to be available
+  #       echo "Waiting for MS SQL to be available ⏳"
+  #       /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "SET NOCOUNT ON SELECT \"YAY WE ARE UP\" , @@servername"
+  #       is_up=$$?
+  #       while [ $$is_up -ne 0 ] ; do
+  #         echo -e $$(date)
+  #         /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "SET NOCOUNT ON SELECT \"YAY WE ARE UP\" , @@servername"
+  #         is_up=$$?
+  #         sleep 5
+  #       done
+
+  #       echo "Create demo DB"
+  #       /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "CREATE DATABASE demo"
+          
+  #       echo "All scripts have been executed. Waiting for MS SQL(pid $$pid) to terminate."
+  #       # Wait on the sqlserver process
+  #       wait $$pid
+  #   networks:
+  #     - kafka 
+
+  # kafdrop:
+  #   image: obsidiandynamics/kafdrop:latest
+  #   hostname: kafdrop
+  #   container_name: kafdrop
+  #   ports:
+  #     - "9000:9000"
+  #   environment:
+  #     KAFKA_BROKERCONNECT: 'broker:29092'
+  #     SCHEMAREGISTRY_CONNECT: http://schema-registry:8081
+  #     JVM_OPTS: "-Xms16M -Xmx48M -Xss180K -XX:-TieredCompilation -XX:+UseStringDeduplication -noverify"
+  #   networks:
+  #     - kafka
+
+networks:
+  kafka:
+    name: kafka_network
+    driver: bridge
